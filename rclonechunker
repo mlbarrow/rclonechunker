@@ -1,0 +1,95 @@
+#!/bin/bash
+# rclonechunker: Tool to segment and upload large files with rclone
+# (c) 2018 Michael Barrow <michael@barrow.me>
+#
+# 2018-07-03
+#
+# MIT License
+#
+# Copyright (c) 2018 Michael Barrow
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+# Default chunk size is 100 MiB
+defaultChunkSize=104857600
+
+# Number of simultaneous uploads
+parallelOps=2
+
+# Arguments
+file=$1
+dest=$2
+chunkSize=$3
+
+usage()
+{
+  echo "Usage: $0 {filename} {rclone remote:path} [{chunk size in bytes}]"
+  echo "   chunk size defaults to $defaultChunkSize"
+  exit 1
+}
+
+# Check the arguments
+[ -z "$file" ] && { echo "Missing filename"; usage; }
+[ -f "$file" ] || { echo "$file is not a regular file"; usage; }
+[ -z "$chunkSize" ] && chunkSize=$defaultChunkSize
+
+# Let's go!
+chunkSuffix=_CHUNKED_FILE_
+
+fileSize=$(ls -l "$file" | awk '{print $5}')
+
+[ -z "$fileSize" ] && { echo "File size does not look right!"; exit 1; }
+
+if [ $fileSize -lt $chunkSize ]
+then
+  echo "File is smaller than chunksize ($chunkSize)...exiting..."
+  exit 1
+fi
+
+((chunkCount=fileSize / chunkSize))
+((lastChunkSize=fileSize % chunkSize))
+if [ $lastChunkSize -ne 0 ]
+then
+  ((chunkCount++))
+fi
+
+echo "Splitting $file into $chunkCount chunks of $chunkSize bytes and uploading to $dest"
+
+thisChunk=0
+baseName=$(basename "$file")
+chunkName="$dest/${baseName}$chunkSuffix"
+
+while [ $thisChunk -lt $chunkCount ]
+do
+  echo -n "Chunk #${thisChunk}..."
+  chunkFile="$chunkName/${thisChunk}"
+  notDone=$(rclone size "${chunkFile}.DONE" | grep -c 'Total size: 0 Bytes')
+  if [ $notDone -eq 1 ]
+  then
+    ((jobCtrl = jobCtrl % parallelOps)); ((jobCtrl++ == 0)) && wait
+    echo "uploading"
+    (dd if="$file" bs=$chunkSize skip=$thisChunk count=1 2>/dev/null | rclone rcat "$chunkFile" && date | rclone rcat "${chunkFile}.DONE") &
+  else
+    echo "skipping -- already present"
+  fi
+  ((thisChunk++))
+done
+
+echo "DONE!"
+exit
