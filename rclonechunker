@@ -26,16 +26,17 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-# Default chunk size is 100 MiB
-defaultChunkSize=104857600
+# Default chunk size is 200 MiB
+defaultChunkSize=209715200
 
 # Number of simultaneous uploads
-parallelOps=2
+parallelOps=4
 
 # Arguments
 file=$1
 dest=$2
 chunkSize=$3
+baseName=$(basename "$file")
 
 usage()
 {
@@ -45,14 +46,19 @@ usage()
 }
 
 # Check the arguments
+[ -h "$file" ] && file=$(readlink -f "$file")
 [ -z "$file" ] && { echo "Missing filename"; usage; }
-[ -f "$file" ] || { echo "$file is not a regular file"; usage; }
+if [ -f "$file" ]; then
+  fileSize=$(ls -l "$file" | awk '{print $5}')
+elif [ -b "$file" ]; then
+  fileSize=$(df -B1 "$file" | tail -n1 | awk '{print $2}')
+else
+  echo "$file is not a regular file, nor a block device"; usage
+fi
 [ -z "$chunkSize" ] && chunkSize=$defaultChunkSize
 
 # Let's go!
 chunkSuffix=_CHUNKED_FILE_
-
-fileSize=$(ls -l "$file" | awk '{print $5}')
 
 [ -z "$fileSize" ] && { echo "File size does not look right!"; exit 1; }
 
@@ -72,19 +78,21 @@ fi
 echo "Splitting $file into $chunkCount chunks of $chunkSize bytes and uploading to $dest"
 
 thisChunk=0
-baseName=$(basename "$file")
 chunkName="$dest/${baseName}$chunkSuffix"
+compressProgram="lz4 -9 -" # use 'cat' for no compression
+
+[ "$RCLONE_PURGE" = "yes" ] && rclone purge ${chunkName}
 
 while [ $thisChunk -lt $chunkCount ]
 do
   echo -n "Chunk #${thisChunk}..."
   chunkFile="$chunkName/${thisChunk}"
-  notDone=$(rclone size "${chunkFile}.DONE" | grep -c 'Total size: 0 Bytes')
+  notDone=$(rclone size "${chunkFile}.DONE" 2>&1 | egrep -c '(Total size: 0 Bytes|ERROR)')
   if [ $notDone -eq 1 ]
   then
     ((jobCtrl = jobCtrl % parallelOps)); ((jobCtrl++ == 0)) && wait
     echo "uploading"
-    (dd if="$file" bs=$chunkSize skip=$thisChunk count=1 2>/dev/null | rclone rcat "$chunkFile" && date | rclone rcat "${chunkFile}.DONE") &
+    (dd if="$file" bs=$chunkSize skip=$thisChunk count=1 2>/dev/null | $compressProgram | rclone rcat "$chunkFile" && date | rclone rcat "${chunkFile}.DONE") &
   else
     echo "skipping -- already present"
   fi
